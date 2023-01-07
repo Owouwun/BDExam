@@ -333,5 +333,5 @@ CREATE OR REPLACE VIEW Parcel_View AS SELECT * FROM Parcel_User;
 CREATE TABLE Problematic_Parcel (
   parcel_id NUMERIC,
   status VARCHAR2(64),
-  is_get NUMERIC(1) NULL
+  is_accepted NUMERIC(1) NULL
 );

@@ -77,10 +77,12 @@ INSERT INTO Parcel VALUES (
 
 CREATE OR REPLACE TRIGGER ParcelToStorage_onCreate AFTER INSERT ON Parcel FOR EACH ROW
 
-
---Использовать instead_of, если нужно запретить добавлять партии без места на складе!
+Обработка созданной партии
+->Если партия принимается, то она отправляется на склад.
+->Если парти отзывается, то с ней ничего не делается.
+-- Отправка партии на склад при принятии на соответствующую полку
 SET SERVEROUTPUT ON
-CREATE OR REPLACE TRIGGER ParcelToStorage_onCreate AFTER INSERT ON Parcel FOR EACH ROW
+CREATE OR REPLACE TRIGGER ParcelToStorage AFTER UPDATE ON Problematic_Parcel FOR EACH ROW
 DECLARE
     place_of_storage_id NUMERIC;
     username VARCHAR(32);
@@ -89,44 +91,54 @@ DECLARE
     goods_storage_condition_id NUMERIC;
     shelf_id NUMERIC;
     shelf_number_of_places NUMERIC;
-BEGIN
-    SELECT user
-        INTO username
-        FROM dual;
-
-    SELECT id
-        INTO userid
-        FROM Staff_member
-        WHERE login=username;
     
-    SELECT type_id
-        INTO goods_type_id
-        FROM Goods
-        WHERE id=:new.goods_id;
-        
-    SELECT storage_condition_id
-        INTO goods_storage_condition_id
-        FROM Goods_type
-        WHERE id=goods_type_id;
-        
-    SELECT id, number_of_places
-        INTO shelf_id, shelf_number_of_places
-        FROM Shelf
-        WHERE (place_of_storage_id=3 AND storage_condition_id=goods_storage_condition_id);
+    goodsId NUMERIC;
+    goodsNumber NUMERIC;
+BEGIN
+    IF :new.is_accepted=1 THEN
+        SELECT user
+            INTO username
+            FROM dual;
 
-    IF (shelf_number_of_places-:new.goods_number)<0 THEN
-        DBMS_OUTPUT.put_line('Out of places!');
-    ELSE
-        INSERT INTO Operation VALUES (
-            seq_operation.nextval,
-            1,
-            userid,
-            SYSDATE,
-            shelf_id
-        );
-        UPDATE Shelf
-            SET number_of_places=number_of_places-:new.goods_number
-            WHERE id=shelf_id;
+        SELECT goods_id, goods_number
+            INTO goodsId, goodsNumber
+            FROM Parcel
+            WHERE id=:new.parcel_id;
+
+        SELECT id
+            INTO userid
+            FROM Staff_member
+            WHERE login=username;
+    
+        SELECT type_id
+            INTO goods_type_id
+            FROM Goods
+            WHERE id=goodsId;
+        
+        SELECT storage_condition_id
+            INTO goods_storage_condition_id
+            FROM Goods_type
+            WHERE id=goods_type_id;
+        
+        SELECT id, number_of_places
+            INTO shelf_id, shelf_number_of_places
+            FROM Shelf
+            WHERE (place_of_storage_id=3 AND storage_condition_id=goods_storage_condition_id);
+
+        IF (shelf_number_of_places-goodsNumber)<0 THEN
+            DBMS_OUTPUT.put_line('Out of places!');
+        ELSE
+            INSERT INTO Operation VALUES (
+                seq_operation.nextval,
+                1,
+                userid,
+                SYSDATE,
+                shelf_id
+            );
+            UPDATE Shelf
+                SET number_of_places=number_of_places-goodsNumber
+                WHERE id=shelf_id;
+        END IF;
     END IF;
 END;
 
