@@ -500,31 +500,3 @@ INSERT INTO Parcel_View VALUES (
 UPDATE Problematic_parcel SET is_accepted=1 WHERE parcel_id=1;
 
 DBMS_OUTPUT.put_line('');
-
-SET SERVEROUTPUT ON
-CREATE OR REPLACE TRIGGER trg_update_shelf_by_operation
-    INSTEAD OF INSERT ON Operation_and_parcel
-    FOR EACH ROW
-DECLARE
-    operationType NUMERIC;
-    shelfId NUMERIC;
-
-    --PRAGMA autonomous_transaction;
-BEGIN
-    SELECT type_id, shelf_id
-        INTO operationType, shelfId
-        FROM Operation
-        WHERE id=:new.operation_id;
-    
-    
-    IF operationType=1 THEN
-        UPDATE Shelf
-            SET number_of_places=number_of_places-:new.goods_number
-            WHERE id=shelfId;
-    ELSE
-        UPDATE Shelf
-            SET number_of_places=number_of_places+:new.goods_number
-            WHERE id=shelfId;
-    END IF;
-END trg_update_shelf_by_operation;
-/
