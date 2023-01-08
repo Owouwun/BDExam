@@ -267,17 +267,17 @@ CREATE SEQUENCE seq_writeoff
 CREATE TABLE WriteOff ( -- Списание товара
   id NUMERIC(32) NOT NULL,
   cause_id NUMERIC(2) NOT NULL, -- Причина
-  place_of_storage_id NUMERIC(2) NULL, -- Место хранение товара
-  exectuer_id NUMERIC(6) NOT NULL, -- Проводящий списание
+  shelf_id NUMERIC(2) NULL, -- "Полка" хранения товара
+  executer_id NUMERIC(6) NOT NULL, -- Проводящий списание
   executing_date DATE NOT NULL, -- Дата списания
   commentary VARCHAR(128) NOT NULL, -- Комментарий
   --
   PRIMARY KEY(id),
   FOREIGN KEY(cause_id)
     REFERENCES WriteOff_cause(id),
-  FOREIGN KEY(place_of_storage_id)
-    REFERENCES Place_of_storage(id),
-  FOREIGN KEY(exectuer_id)
+  FOREIGN KEY(shelf_id)
+    REFERENCES Shelf(id),
+  FOREIGN KEY(executer_id)
     REFERENCES Staff_member(id)
 );
 
@@ -335,3 +335,12 @@ CREATE TABLE Problematic_Parcel (
   status VARCHAR2(64),
   is_accepted NUMERIC(1) NULL
 );
+
+CREATE OR REPLACE VIEW Parcel_from_S_to_TZ AS
+  SELECT SS.id AS SSid, STZ.id AS STZid, P.id AS parcel_id, P.goods_number
+  FROM Shelf SS, Shelf STZ, Parcel P
+  WHERE (SS.place_of_storage_id=3 AND STZ.place_of_storage_id=4);
+
+CREATE OR REPLACE VIEW WriteOff_view AS
+  SELECT WO.shelf_id, WOaP.parcel_id, WOaP.parcel_number, WO.cause_id, WO.commentary
+  FROM WriteOff WO, WritedOff_and_parcel WOaP;

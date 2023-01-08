@@ -1,0 +1,7 @@
+    INSTEAD OF INSERT ON Parcel_View
+    INSTEAD OF INSERT ON Parcel_from_S_to_TZ
+    INSTEAD OF INSERT ON WriteOff_view
+    AFTER INSERT ON Operation_and_parcel
+    AFTER INSERT ON WritedOff_and_parcel
+    AFTER UPDATE ON Problematic_Parcel
+    AFTER UPDATE ON Shelf
