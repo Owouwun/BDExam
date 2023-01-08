@@ -1,5 +1,5 @@
 -- БП1.
-
+--
 --Проверка товара на наличие в БД; Вывод даты пропажи товара на основе даты изготовления (инф-ция исп-ся в БП2);
 CREATE OR REPLACE PACKAGE exam AS
     TYPE checkGoods_record IS RECORD (
@@ -19,7 +19,7 @@ CREATE OR REPLACE PACKAGE exam AS
     FUNCTION parcel_residue(parcel_id NUMERIC, shelf_id NUMERIC)
         RETURN NUMERIC;
 END;
-
+/
 CREATE OR REPLACE PACKAGE BODY exam AS
     FUNCTION checkGoods(goods_name VARCHAR2, goods_production_date DATE)
         RETURN checkGoods_table
@@ -64,34 +64,42 @@ CREATE OR REPLACE PACKAGE BODY exam AS
         RETURN residue;
     END parcel_residue;
 END;
-
+/
 --БП2
-
+--
 -- Изменение количества места на полке, если мы добавили или убрали с неё товар
 -- Операцией
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_update_shelf_by_operation
-    AFTER INSERT ON Operation_and_parcel
-    FOR EACH ROW
-DECLARE
+    FOR INSERT ON Operation_and_parcel
+    COMPOUND TRIGGER
+    
     operationType NUMERIC;
     shelfId NUMERIC;
-BEGIN
+
+    goodsNumber NUMERIC;
+    --PRAGMA autonomous_transaction;
+BEFORE EACH ROW IS BEGIN
     SELECT type_id, shelf_id
         INTO operationType, shelfId
         FROM Operation
         WHERE id=:new.operation_id;
-        
+    goodsNumber := :new.goods_number;
+END BEFORE EACH ROW;
+
+AFTER STATEMENT IS BEGIN
     IF operationType=1 THEN
         UPDATE Shelf
-            SET number_of_places=number_of_places-:new.goods_number
+            SET number_of_places=number_of_places-goodsNumber 
             WHERE id=shelfId;
     ELSE
         UPDATE Shelf
-            SET number_of_places=number_of_places+:new.goods_number
+            SET number_of_places=number_of_places+goodsNumber 
             WHERE id=shelfId;
     END IF;
+END AFTER STATEMENT; 
 END trg_update_shelf_by_operation;
+/
 -- Списанием
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_update_shelf_by_writeOff
@@ -99,6 +107,8 @@ CREATE OR REPLACE TRIGGER trg_update_shelf_by_writeOff
     FOR EACH ROW
 DECLARE
     shelfId NUMERIC;
+
+    --PRAGMA autonomous_transaction;
 BEGIN
     SELECT shelf_id
         INTO shelfId
@@ -109,7 +119,7 @@ BEGIN
         SET number_of_places=number_of_places+:new.parcel_number
         WHERE id=shelfId;
 END trg_update_shelf_by_writeOff;
-
+/
 -- Попытка добавления товара в партию.
 -- Если всё хорошо, попытка проводится как обычно, в Problematic Parcel состояние "ОК" и IS_ACCESSED=1 (Принято)
 -- Если что-то не то, то записываем в статус Problematic Parcel состояние ошибки, IS_ACCESSED=NULL
@@ -125,6 +135,8 @@ DECLARE
     expected_goodsNumber NUMERIC NULL;
     status VARCHAR(64) NOT NULL := 'OK';
     parcelId NUMERIC NULL;
+
+    --PRAGMA autonomous_transaction;
 BEGIN
     SELECT id
         INTO expected_goodsId
@@ -203,13 +215,13 @@ BEGIN
         :new.goods_number
     );
 END trg_insert_parcel;
-
+/
 -- Обработка созданной партии:
 -- Если партия принимается (Problematic_parcel.is_accessed=1), то она отправляется на склад на соответствующую полку;
 -- Если парти отзывается (Problematic_parcel.is_accessed=1) или решение о принятии ещё не принято (=NULL), то с ней ничего не делается.
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER ParcelToStorage
-    AFTER UPDATE ON Problematic_Parcel
+    AFTER UPDATE OF is_accepted ON Problematic_Parcel
     FOR EACH ROW
 DECLARE
     place_of_storage_id NUMERIC;
@@ -223,6 +235,8 @@ DECLARE
     goodsId NUMERIC;
     goodsNumber NUMERIC;
     operationId NUMERIC;
+
+    --PRAGMA autonomous_transaction;
 BEGIN
     IF :new.is_accepted=1 THEN
         SELECT user
@@ -274,8 +288,8 @@ BEGIN
             );
         END IF;
     END IF;
-END;
-
+END ParcelToStorage;
+/
 -- Движение партии со склада в торговый зал, если в нём есть место (На самом деле, пока что можно с любой полки на любую полку тягать)
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_parcel_from_s_to_tz
@@ -287,6 +301,8 @@ DECLARE
     operationId NUMERIC;
     userName VARCHAR2(64);
     userId NUMERIC;
+
+    --PRAGMA autonomous_transaction;
 BEGIN
     SELECT number_of_places
         INTO STZ_numberOfPlaces
@@ -340,7 +356,7 @@ BEGIN
         );
     END IF; 
 END trg_parcel_from_s_to_tz;
-
+/
 -- Списание товара с указанием причины
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_writeOff_insert
@@ -350,6 +366,8 @@ DECLARE
     writeOffId NUMERIC;
     userName VARCHAR2(64);
     userId NUMERIC;
+
+    --PRAGMA autonomous_transaction;
 BEGIN
     SELECT seq_writeoff.nextval
         INTO writeOffId
@@ -377,6 +395,98 @@ BEGIN
         :new.parcel_number
     );
 END trg_parcel_from_s_to_tz;
+/
+-- Ищем положительные остатки партий на складе на полке с типом хранения ?
+-- Сортируем их по времени прибытия и выбираем самый ранний
+-- Выводим id найденной партии и её остаток на полке ?
+-- Перевозим как можно больше единиц товаров, но не больше чем свободное место в ТЗ на нужной полке
+SET SERVEROUTPUT ON
+CREATE OR REPLACE TRIGGER trg_fill_tz
+    FOR UPDATE OF number_of_places ON Shelf
+    COMPOUND TRIGGER 
+    
+    isShelfUpdated BOOLEAN := FALSE;
+    isTZShelf BOOLEAN;
+    gotShelfId NUMERIC;
+    TZShelfId NUMERIC;
+    TZShelfStorageConditionId NUMERIC;
+    TZShelfNumberOfPlaces NUMERIC;
+    parcelId NUMERIC;
+    parcelResidue NUMERIC;
+    SShelfId NUMERIC;
+
+    --PRAGMA autonomous_transaction;
+BEFORE EACH ROW IS
+BEGIN
+    IF (:new.number_of_places-:old.number_of_places<0 AND (:new.id=1 OR :new.id=2 OR :new.id=3)) THEN
+        isShelfUpdated := TRUE;
+        isTZShelf := FALSE;
+        gotShelfId := :new.id;
+    ELSIF (:new.number_of_places-:old.number_of_places>0 AND (:new.id=4 OR :new.id=5 OR :new.id=6)) THEN
+        isShelfUpdated := TRUE;
+        isTZShelf := TRUE;
+        gotShelfId := :new.id;
+    END IF;
+END BEFORE EACH ROW;
+
+AFTER STATEMENT IS  
+BEGIN
+    IF (isShelfUpdated=TRUE) THEN
+        -- Получить id полки в ТЗ
+        IF (isTZShelf=TRUE) THEN
+            TZShelfId := gotShelfId;
+        ELSE
+            SELECT TZS.id
+                INTO TZShelfId
+                FROM Shelf TZS, Shelf SS
+                WHERE (
+                    SS.id = gotShelfId AND
+                    TZS.place_of_storage_id=4 AND
+                    TZS.storage_condition_id=SS.storage_condition_id
+                    );
+        END IF;
+        
+        -- Получить данные о полке в ТЗ
+        SELECT storage_condition_id, number_of_places
+            INTO TZShelfStorageConditionId, TZShelfNumberOfPlaces
+            FROM Shelf
+            WHERE id=TZShelfId;
+        
+        -- Данные о партии на складе
+        SELECT P.id, S.id, exam.parcel_residue(P.id,S.id)
+            INTO parcelId, SShelfId, parcelResidue
+            FROM Operation O, Operation_and_parcel OaP, Parcel P, Shelf S
+            WHERE (
+                S.place_of_storage_id=3 AND
+                OaP.parcel_id=P.id AND
+                O.shelf_id=S.id AND
+                OaP.operation_id=O.id AND
+                S.storage_condition_id=TZShelfStorageConditionId AND
+                exam.parcel_residue(P.id,S.id)>0
+                )
+            ORDER BY O.executing_date
+            OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY;
+            
+        IF TZShelfNumberOfPlaces>parcelResidue THEN -- Если место на полке ещё останется 
+            INSERT INTO Parcel_from_S_to_TZ VALUES (
+                SShelfId,
+                TZShelfId,
+                parcelId,
+                parcelResidue
+                );
+        ELSE -- Если места на полке уже не останется
+            INSERT INTO Parcel_from_S_to_TZ VALUES (
+                SShelfId,
+                TZShelfId,
+                parcelId,
+                TZShelfNumberOfPlaces
+                );
+        END IF;
+        isShelfUpdated := FALSE;
+    END IF;
+END AFTER STATEMENT;  
+END trg_fill_tz;
+/
 
 -- Информация о товарах из партий, привезённых сегодня
 SELECT G.name as Goods_name, GT.name as Goods_type, G.shelf_life, DCaG.goods_number, DC.delivery_date, S.enterprise_name
@@ -387,67 +497,34 @@ INSERT INTO Parcel_View VALUES (
     'Мясо куриное', 'АГРОМИКС', 'A111AA01', TO_DATE('10-01-23','DD-MM-YY'), 23
 );
 
-UPDATE Problematic_parcel SET is_accepted=1 WHERE parcel_id=2;
+UPDATE Problematic_parcel SET is_accepted=1 WHERE parcel_id=1;
 
--- Ищеи положительные остатки партий на складе на полке с типом хранения ?
--- Сортируем их по времени прибытия и выбираем самый ранний
--- Выводим id найденной партии и её остаток на полке ?
--- Перевозим как можно больше единиц товаров, но не больше чем свободное место в ТЗ на нужной полке
+DBMS_OUTPUT.put_line('');
+
 SET SERVEROUTPUT ON
-CREATE OR REPLACE TRIGGER trg_fill_tz
-    AFTER UPDATE ON Shelf
+CREATE OR REPLACE TRIGGER trg_update_shelf_by_operation
+    INSTEAD OF INSERT ON Operation_and_parcel
     FOR EACH ROW
 DECLARE
-    difference NUMERIC;
-    
-    shelf_storageConditionId NUMERIC;
-    parcelId NUMERIC;
-    parcelResidue NUMERIC;
-    shelf_numberOfPlaces NUMERIC;
-    fromShelfId NUMERIC;
-    toShelfId NUMERIC;
-    
-    PRAGMA autonomous_transaction;
+    operationType NUMERIC;
+    shelfId NUMERIC;
+
+    --PRAGMA autonomous_transaction;
 BEGIN
-    difference := :new.number_of_places-:old.number_of_places;
-    IF (difference<0) THEN
-        shelf_storageConditionId := :new.storage_condition_id;
-        shelf_numberOfPlaces := :new.number_of_places;
-        toShelfId := :new.id;
-        
-        LOOP
-            -- Данные о партии на складе
-            SELECT P.id, S.id, exam.parcel_residue(P.id,S.id)
-                INTO parcelId, fromShelfId, parcelResidue
-                FROM Operation O, Operation_and_parcel OaP, Parcel P, Shelf S
-                WHERE (
-                    S.place_of_storage_id=3 AND
-                    OaP.parcel_id=P.id AND
-                    O.shelf_id=S.id AND
-                    OaP.operation_id=O.id AND
-                    S.storage_condition_id=shelf_storageConditionId AND
-                    exam.parcel_residue(P.id,S.id)>0
-                    )
-                ORDER BY O.executing_date
-                OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY;
-            IF shelf_numberOfPlaces>parcelResidue THEN -- Если место на полке ещё останется 
-                -- Ломаюсь на следующей функции
-                INSERT INTO Parcel_from_S_to_TZ VALUES (
-                    fromShelfId,
-                    toShelfId,
-                    parcelId,
-                    parcelResidue
-                    );
-                shelf_numberOfPlaces := shelf_numberOfPlaces-parcelResidue;
-            ELSE -- Если места на полке уже не останется
-                INSERT INTO Parcel_from_S_to_TZ VALUES (
-                    fromShelfId,
-                    toShelfId,
-                    parcelId,
-                    shelf_numberOfPlaces
-                    );
-                EXIT;
-            END IF;
-        END LOOP;
+    SELECT type_id, shelf_id
+        INTO operationType, shelfId
+        FROM Operation
+        WHERE id=:new.operation_id;
+    
+    
+    IF operationType=1 THEN
+        UPDATE Shelf
+            SET number_of_places=number_of_places-:new.goods_number
+            WHERE id=shelfId;
+    ELSE
+        UPDATE Shelf
+            SET number_of_places=number_of_places+:new.goods_number
+            WHERE id=shelfId;
     END IF;
-END trg_fill_tz;
+END trg_update_shelf_by_operation;
+/
