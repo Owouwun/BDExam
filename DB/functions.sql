@@ -436,6 +436,7 @@ END BEFORE EACH ROW;
 AFTER STATEMENT IS  
 BEGIN
     IF (isShelfUpdated=TRUE) THEN
+    BEGIN
         -- Получить id полки в ТЗ
         IF (isTZShelf=TRUE) THEN
             TZShelfId := gotShelfId;
@@ -487,6 +488,10 @@ BEGIN
                 );
         END IF;
         isShelfUpdated := FALSE;
+    EXCEPTION
+    WHEN no_data_found  THEN
+        isShelfUpdated := FALSE;
+    END;
     END IF;
 END AFTER STATEMENT;  
 END trg_fill_tz;
