@@ -16,7 +16,7 @@ CREATE OR REPLACE PACKAGE exam AS
         PIPELINED;
         
     -- Проверка остатков партии на полке по ИС
-    FUNCTION parcel_residue(parcel_id NUMERIC, shelf_id NUMERIC)
+    FUNCTION parcel_residue(parcelId NUMERIC, shelfId NUMERIC)
         RETURN NUMERIC;
 END;
 /
@@ -42,7 +42,6 @@ CREATE OR REPLACE PACKAGE BODY exam AS
                 status := 'It is losing!';
             END IF;
         END IF;        
-        
         CLOSE c_shelf_life;
     
         SELECT status, goods_loss_date
@@ -53,22 +52,44 @@ CREATE OR REPLACE PACKAGE BODY exam AS
         RETURN;
     END checkGoods;
 
-    FUNCTION parcel_residue(parcel_id NUMERIC, shelf_id NUMERIC)
+    FUNCTION parcel_residue(parcelId NUMERIC, shelfId NUMERIC)
         RETURN NUMERIC IS
-        residue NUMERIC;
+        positive_operation NUMERIC:=0;
+        cursor c_positive_operation IS SELECT NVL(SUM(OaP.goods_number),0)
+                INTO positive_operation
+                FROM Operation O, Operation_and_parcel OaP
+                WHERE (
+                    O.shelf_id=shelfId AND OaP.parcel_id=parcelId AND -- Нужные полка и партия
+                    O.type_id=1 AND -- Приход
+                    OaP.operation_id=O.id
+                );
+        negative_operation NUMERIC:=0;
+        cursor c_negative_operation IS SELECT NVL(SUM(OaP.goods_number),0)
+                INTO positive_operation
+                FROM Operation O, Operation_and_parcel OaP
+                WHERE (
+                    O.shelf_id=shelfId AND OaP.parcel_id=parcelId AND -- Нужные полка и партия
+                    O.type_id=2 AND -- Расход
+                    OaP.operation_id=O.id
+                );
+        residue NUMERIC :=0;
     BEGIN
-        SELECT SUM(OaP.goods_number)
-            INTO residue
-            FROM Operation O, Operation_and_parcel OaP
-            WHERE (O.shelf_id=shelf_id AND OaP.parcel_id=parcel_id AND OaP.Operation_id=O.id);
+        open c_positive_operation;
+        fetch c_positive_operation into positive_operation;
+        CLOSE c_positive_operation;
+        
+        open c_negative_operation;
+        fetch c_negative_operation into negative_operation;
+        CLOSE c_negative_operation;
+            
+        residue := positive_operation-negative_operation;
         RETURN residue;
     END parcel_residue;
 END;
 /
 --БП2
 --
--- Изменение количества места на полке, если мы добавили или убрали с неё товар
--- Операцией
+-- Изменение количества места на полке, если мы добавили или убрали с неё товар Операцией
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_update_shelf_by_operation
     FOR INSERT ON Operation_and_parcel
@@ -100,25 +121,8 @@ AFTER STATEMENT IS BEGIN
 END AFTER STATEMENT; 
 END trg_update_shelf_by_operation;
 /
--- Списанием
-SET SERVEROUTPUT ON
-CREATE OR REPLACE TRIGGER trg_update_shelf_by_writeOff
-    AFTER INSERT ON WritedOff_and_parcel
-    FOR EACH ROW
-DECLARE
-    shelfId NUMERIC;
+-- Проведение расхода при подтверждении списании партии (если будет ОК)
 
-    --PRAGMA autonomous_transaction;
-BEGIN
-    SELECT shelf_id
-        INTO shelfId
-        FROM Operation
-        WHERE id=:new.writeOff_id;
-        
-    UPDATE Shelf
-        SET number_of_places=number_of_places+:new.parcel_number
-        WHERE id=shelfId;
-END trg_update_shelf_by_writeOff;
 /
 -- Попытка добавления товара в партию.
 -- Если всё хорошо, попытка проводится как обычно, в Problematic Parcel состояние "ОК" и IS_ACCESSED=1 (Принято)
@@ -487,6 +491,73 @@ BEGIN
 END AFTER STATEMENT;  
 END trg_fill_tz;
 /
+-- Проведение расходной операции по подтверждённому списанию
+SET SERVEROUTPUT ON
+CREATE OR REPLACE TRIGGER trg_writeOff_update_operate
+    FOR UPDATE OF commentary ON WriteOff
+COMPOUND TRIGGER
+    shelfId NUMERIC;
+    parcelId NUMERIC;
+    parcelNumber NUMERIC;
+    
+    operate BOOLEAN := FALSE;
+BEFORE EACH ROW IS BEGIN
+    IF :new.commentary='OK' THEN
+        operate := TRUE;
+        shelfId := :new.shelf_id;
+        SELECT parcel_id, parcel_number
+            INTO parcelId, parcelNumber
+            FROM WritedOff_and_parcel
+            WHERE writeOff_id=:new.id;
+    END IF;
+END BEFORE EACH ROW;
+
+AFTER STATEMENT IS BEGIN
+    INSERT INTO Parcel_from VALUES (
+        shelfId,
+        parcelId,
+        parcelNumber
+        );
+    operate := FALSE;
+END AFTER STATEMENT;  
+END trg_writeOff_update_operate;
+/
+-- Расходная операция c полки
+SET SERVEROUTPUT ON
+CREATE OR REPLACE TRIGGER trg_parcel_from
+    INSTEAD OF INSERT ON Parcel_from
+    FOR EACH ROW
+DECLARE
+    userName VARCHAR2(64);
+    userId NUMERIC;
+    operationId NUMERIC;
+BEGIN
+    SELECT user
+        INTO userName
+        FROM dual;
+    SELECT id
+        INTO userId
+        FROM Staff_member
+        WHERE login=userName;
+        
+    -- Проведение операции по расходу на полке
+    SELECT seq_operation.nextval
+        INTO operationId
+        FROM DUAL;
+    INSERT INTO Operation VALUES (
+        operationId,
+        2,
+        userId,
+        SYSDATE,
+        :new.shelf_id
+    );
+    INSERT INTO Operation_and_parcel VALUES (
+        operationId,
+        :new.parcel_id,
+        :new.goods_number
+    );
+END trg_parcel_from;
+/
 
 -- Информация о товарах из партий, привезённых сегодня
 SELECT G.name as Goods_name, GT.name as Goods_type, G.shelf_life, DCaG.goods_number, DC.delivery_date, S.enterprise_name
@@ -499,4 +570,20 @@ INSERT INTO Parcel_View VALUES (
 
 UPDATE Problematic_parcel SET is_accepted=1 WHERE parcel_id=1;
 
+UPDATE TABLE Shelf SET number_of_places=number_of_places+5 WHERE id=3;
+
+INSERT INTO WriteOff_view VALUES (
+    6,
+    1,
+    5,
+    1,
+    'smth'
+);
+
+UPDATE WriteOff
+    SET commentary='OK'
+    WHERE id=1;
+
 DBMS_OUTPUT.put_line('');
+
+select exam.parcel_residue(1,3) from dual;

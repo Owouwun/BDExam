@@ -344,3 +344,7 @@ CREATE OR REPLACE VIEW Parcel_from_S_to_TZ AS
 CREATE OR REPLACE VIEW WriteOff_view AS
   SELECT WO.shelf_id, WOaP.parcel_id, WOaP.parcel_number, WO.cause_id, WO.commentary
   FROM WriteOff WO, WritedOff_and_parcel WOaP;
+CREATE OR REPLACE VIEW Parcel_from AS
+  SELECT S.id AS shelf_id, P.id AS parcel_id, P.goods_number
+  FROM Shelf S, Parcel P;
+  
