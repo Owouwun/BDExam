@@ -121,9 +121,6 @@ AFTER STATEMENT IS BEGIN
 END AFTER STATEMENT; 
 END trg_update_shelf_by_operation;
 /
--- Проведение расхода при подтверждении списании партии (если будет ОК)
-
-/
 -- Попытка добавления товара в партию.
 -- Если всё хорошо, попытка проводится как обычно, в Problematic Parcel состояние "ОК" и IS_ACCESSED=1 (Принято)
 -- Если что-то не то, то записываем в статус Problematic Parcel состояние ошибки, IS_ACCESSED=NULL
@@ -246,16 +243,15 @@ BEGIN
         SELECT user
             INTO username
             FROM dual;
+        SELECT id
+            INTO userid
+            FROM Staff_member
+            WHERE login=username;
 
         SELECT goods_id, goods_number
             INTO goodsId, goodsNumber
             FROM Parcel
             WHERE id=:new.parcel_id;
-
-        SELECT id
-            INTO userid
-            FROM Staff_member
-            WHERE login=username;
     
         SELECT type_id
             INTO goods_type_id
@@ -489,7 +485,7 @@ BEGIN
         END IF;
         isShelfUpdated := FALSE;
     EXCEPTION
-    WHEN no_data_found  THEN
+    WHEN no_data_found THEN
         isShelfUpdated := FALSE;
     END;
     END IF;
@@ -563,6 +559,117 @@ BEGIN
     );
 END trg_parcel_from;
 /
+-- Обработка новой записи в инвентаризацию
+SET SERVEROUTPUT ON
+CREATE OR REPLACE TRIGGER trg_stocktaking_parcel
+    INSTEAD OF INSERT ON Stocktaking_parcel_view
+    FOR EACH ROW
+DECLARE
+    stocktakingId NUMERIC;
+    userName VARCHAR(32);
+    userId NUMERIC;
+BEGIN
+    BEGIN
+        SELECT id
+            INTO stocktakingId
+            FROM Stocktaking
+            WHERE executing_date=SYSDATE;
+        EXCEPTION
+        WHEN no_data_found THEN
+            BEGIN
+                SELECT user
+                    INTO userName
+                    FROM dual;
+                SELECT id
+                    INTO userId
+                    FROM Staff_member
+                    WHERE login=userName;
+                SELECT seq_stocktaking.nextval
+                    INTO stocktakingId
+                    FROM Dual;
+                INSERT INTO Stocktaking VALUES (
+                    stocktakingId,
+                    userid,
+                    SYSDATE
+                );
+            END;
+    END;
+    INSERT INTO Stocktaking_parcel VALUES (
+        seq_stocktaking_parcel.nextval,
+        stocktakingId,
+        :new.parcel_id,
+        :new.shelf_id,
+        :new.stock
+    );
+END trg_stocktaking_parcel;
+/
+-- Создание объекта инвентаризации во время проведения
+SET SERVEROUTPUT ON
+CREATE OR REPLACE TRIGGER trg_stocktaking_parcel
+    INSTEAD OF INSERT ON Stocktaking_parcel_view
+    FOR EACH ROW
+DECLARE
+    stocktakingId NUMERIC;
+    userName VARCHAR(32);
+    userId NUMERIC;
+BEGIN
+    BEGIN
+        SELECT id
+            INTO stocktakingId
+            FROM Stocktaking
+            WHERE TO_DATE(executing_date,'dd-mm-yy')=TO_DATE(SYSDATE,'dd-mm-yy');
+        EXCEPTION
+        WHEN no_data_found THEN
+            BEGIN
+                SELECT user
+                    INTO userName
+                    FROM dual;
+                SELECT id
+                    INTO userId
+                    FROM Staff_member
+                    WHERE login=userName;
+                SELECT seq_stocktaking.nextval
+                    INTO stocktakingId
+                    FROM Dual;
+                INSERT INTO Stocktaking VALUES (
+                    stocktakingId,
+                    userid,
+                    SYSDATE
+                );
+            END;
+    END;
+    INSERT INTO Stocktaking_parcel VALUES (
+        seq_stocktaking_parcel.nextval,
+        stocktakingId,
+        :new.parcel_id,
+        :new.shelf_id,
+        :new.stock
+    );
+END trg_stocktaking_parcel;
+/
+-- Сравнение стоков с данными в ИС с целью найти пропажу
+SET SERVEROUTPUT ON
+CREATE OR REPLACE TRIGGER trg_stealing
+    AFTER INSERT ON Stocktaking_parcel
+    FOR EACH ROW
+DECLARE
+    expectedStock NUMERIC;
+BEGIN
+    SELECT number_of_goods
+        INTO expectedStock
+        FROM Shelf_and_parcel
+        WHERE (parcel_id=:new.parcel_id AND shelf_id=:new.shelf_id);
+    IF expectedStock>:new.stock THEN
+        INSERT INTO WriteOff_view VALUES (
+            :new.shelf_id,
+            :new.parcel_id,
+            expectedStock-:new.stock,
+            4,
+            'inventarization'
+        );
+    END IF;
+END trg_stealing;
+/
 
 -- Информация о товарах из партий, привезённых сегодня
 SELECT G.name as Goods_name, GT.name as Goods_type, G.shelf_life, DCaG.goods_number, DC.delivery_date, S.enterprise_name
@@ -575,7 +682,7 @@ INSERT INTO Parcel_View VALUES (
 
 UPDATE Problematic_parcel SET is_accepted=1 WHERE parcel_id=1;
 
-UPDATE TABLE Shelf SET number_of_places=number_of_places+5 WHERE id=3;
+UPDATE Shelf SET number_of_places=number_of_places+5 WHERE id=3;
 
 INSERT INTO WriteOff_view VALUES (
     6,
@@ -592,3 +699,9 @@ UPDATE WriteOff
 DBMS_OUTPUT.put_line('');
 
 select exam.parcel_residue(1,3) from dual;
+
+INSERT INTO Stocktaking_parcel_view VALUES (
+    1,
+    6,
+    1
+);

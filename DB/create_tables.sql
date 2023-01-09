@@ -308,16 +308,19 @@ CREATE TABLE Stocktaking ( -- Инвентаризация
 CREATE SEQUENCE seq_stocktaking_parcel
   START WITH 1 INCREMENT BY 1;
 CREATE TABLE Stocktaking_parcel ( -- Инвентаризация и её партии
-  id NUMERIC(32) NOT NULL,
+  id NUMERIC(6) NOT NULL,
   stocktaking_id NUMERIC(6) NOT NULL, -- Инвентаризация
   parcel_id NUMERIC(16) NOT NULL, -- Инвентаризованная партия
+  shelf_id NUMERIC(4) NOT NULL, -- Инвентаризированная полка
   stock NUMERIC(8) NOT NULL, -- Остаток партии (количество)
   --
   PRIMARY KEY(id),
   FOREIGN KEY(stocktaking_id)
     REFERENCES Stocktaking(id),
   FOREIGN KEY(parcel_id)
-    REFERENCES Parcel(id)
+    REFERENCES Parcel(id),
+  FOREIGN KEY(shelf_id)
+    REFERENCES Shelf(id)
 );
 
 
@@ -347,4 +350,13 @@ CREATE OR REPLACE VIEW WriteOff_view AS
 CREATE OR REPLACE VIEW Parcel_from AS
   SELECT S.id AS shelf_id, P.id AS parcel_id, P.goods_number
   FROM Shelf S, Parcel P;
-  
+
+CREATE OR REPLACE VIEW Shelf_and_parcel AS
+    SELECT P.id AS parcel_id, S.id AS shelf_id, sum(exam.parcel_residue(P.id,S.id)) AS number_of_goods
+    FROM Shelf S, Parcel P
+    GROUP BY P.id, S.id;
+
+CREATE OR REPLACE VIEW Stocktaking_parcel_view AS
+    SELECT parcel_id, shelf_id, stock
+    FROM Stocktaking_parcel;
+    
