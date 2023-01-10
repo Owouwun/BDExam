@@ -54,8 +54,23 @@ CREATE OR REPLACE PACKAGE BODY exam AS
 
     FUNCTION parcel_residue(parcelId NUMERIC, shelfId NUMERIC)
         RETURN NUMERIC IS
+        lastStocktakingId NUMERIC;
+        lastStocktakingDate DATE;
+        CURSOR c_last_stocktaking IS
+            SELECT S.id, S.executing_date
+            INTO lastStocktakingId, lastStocktakingDate
+            FROM Stocktaking S, Stocktaking_parcel SP
+            WHERE (
+                S.id=SP.stocktaking_id AND
+                SP.parcel_id=parcelId AND
+                SP.shelf_id=shelfId
+            )
+            ORDER BY S.executing_date DESC
+            OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY;
+            
         positive_operation NUMERIC:=0;
-        cursor c_positive_operation IS SELECT NVL(SUM(OaP.goods_number),0)
+        cursor c_positive_operation IS
+            SELECT NVL(SUM(OaP.goods_number),0)
                 INTO positive_operation
                 FROM Operation O, Operation_and_parcel OaP
                 WHERE (
@@ -63,8 +78,19 @@ CREATE OR REPLACE PACKAGE BODY exam AS
                     O.type_id=1 AND -- Приход
                     OaP.operation_id=O.id
                 );
+        cursor c_positive_operation_from_date IS
+            SELECT NVL(SUM(OaP.goods_number),0)
+                INTO positive_operation
+                FROM Operation O, Operation_and_parcel OaP
+                WHERE (
+                    O.shelf_id=shelfId AND OaP.parcel_id=parcelId AND -- Нужные полка и партия
+                    O.type_id=1 AND -- Приход
+                    O.executing_date>lastStocktakingDate AND -- После последней инвентаризации
+                    OaP.operation_id=O.id
+                );
         negative_operation NUMERIC:=0;
-        cursor c_negative_operation IS SELECT NVL(SUM(OaP.goods_number),0)
+        cursor c_negative_operation IS
+            SELECT NVL(SUM(OaP.goods_number),0)
                 INTO positive_operation
                 FROM Operation O, Operation_and_parcel OaP
                 WHERE (
@@ -72,15 +98,54 @@ CREATE OR REPLACE PACKAGE BODY exam AS
                     O.type_id=2 AND -- Расход
                     OaP.operation_id=O.id
                 );
+        cursor c_negative_operation_from_date IS
+            SELECT NVL(SUM(OaP.goods_number),0)
+                INTO positive_operation
+                FROM Operation O, Operation_and_parcel OaP
+                WHERE (
+                    O.shelf_id=shelfId AND OaP.parcel_id=parcelId AND -- Нужные полка и партия
+                    O.type_id=2 AND -- Расход
+                    O.executing_date>lastStocktakingDate AND -- После последней инвентаризации
+                    OaP.operation_id=O.id
+                );
+        
+        lastResidue NUMERIC;
+        cursor c_last_residue IS
+            SELECT stock
+            FROM Stocktaking_parcel
+            WHERE (
+                stocktaking_id=lastStocktakingId AND
+                parcel_id=parcelId AND
+                shelf_id=shelfId
+                );
+        
         residue NUMERIC :=0;
     BEGIN
-        open c_positive_operation;
-        fetch c_positive_operation into positive_operation;
-        CLOSE c_positive_operation;
+        OPEN c_last_stocktaking;
+        FETCH c_last_stocktaking INTO lastStocktakingId, lastStocktakingDate;
+        IF c_last_stocktaking%notfound THEN    
+            open c_positive_operation;
+            fetch c_positive_operation into positive_operation;
+            CLOSE c_positive_operation;
         
-        open c_negative_operation;
-        fetch c_negative_operation into negative_operation;
-        CLOSE c_negative_operation;
+            open c_negative_operation;
+            fetch c_negative_operation into negative_operation;
+            CLOSE c_negative_operation;
+        ELSE
+            open c_positive_operation_from_date;
+            fetch c_positive_operation_from_date into positive_operation;
+            CLOSE c_positive_operation_from_date;
+        
+            open c_negative_operation_from_date;
+            fetch c_negative_operation_from_date into negative_operation;
+            CLOSE c_negative_operation_from_date;
+            
+            OPEN c_last_residue;
+            FETCH c_last_residue INTO lastResidue;
+            CLOSE c_last_residue;
+            positive_operation := positive_operation+lastResidue;
+        END IF;
+        CLOSE c_last_stocktaking;
             
         residue := positive_operation-negative_operation;
         RETURN residue;
@@ -136,60 +201,62 @@ DECLARE
     expected_goodsNumber NUMERIC NULL;
     status VARCHAR(64) NOT NULL := 'OK';
     parcelId NUMERIC NULL;
-
-    --PRAGMA autonomous_transaction;
 BEGIN
-    SELECT id
-        INTO expected_goodsId
-        FROM Goods
-        WHERE name=:new.goods_name;
-    SELECT id
-        INTO expected_supplierId
-        FROM Supplier
-        WHERE enterprise_name=:new.supplier_name;
-    SELECT id
-        INTO expected_truckId
-        FROM Truck
-        WHERE plate=:new.truck_plate;
-    SELECT id
-        INTO expected_deliveryContractId
-        FROM Delivery_contract
-        WHERE (TO_DATE(delivery_date,'DD-MON-YYYY')=TO_DATE(SYSDATE,'DD-MON-YYYY') AND supplier_id=expected_supplierId);
-    SELECT goods_number
-        INTO expected_goodsNumber
-        FROM Delivery_contract_and_goods
-        WHERE (delivery_contract_id=expected_deliveryContractId AND goods_id = expected_goodsId);
-            
-    IF expected_goodsId=NULL THEN
-        status := 'The goods was not found';
-        DBMS_OUTPUT.put_line('Out of places!');
-        RETURN;
-    END IF;
-        
-    IF expected_supplierId=NULL THEN
-        status := 'The supplier was not found';
-        DBMS_OUTPUT.put_line('The supplier was not found');
-        RETURN;
-    END IF;
-        
-    IF expected_truckId=NULL THEN
-        status := 'The truck was not found';
-        DBMS_OUTPUT.put_line('The truck was not found');
-        RETURN;
-    END IF;
-        
-    IF expected_deliveryContractId=NULL THEN
-        status := 'There is no delivery from this supplier today!';
-        DBMS_OUTPUT.put_line('There is no delivery from this supplier today!');
-    ELSE
-        IF expected_goodsNumber=NULL THEN
-            status := 'The goods is not expected in this delivery';
-            DBMS_OUTPUT.put_line('The goods is not expected in this delivery');
-        ELSIF :new.goods_number<>expected_goodsNumber THEN
-            status := 'Expected ' || TO_CHAR(expected_goodsNumber) || ' goods. Got ' || TO_CHAR(:new.goods_number);
+    BEGIN
+        SELECT id
+            INTO expected_goodsId
+            FROM Goods
+            WHERE name=:new.goods_name;
+        EXCEPTION WHEN no_data_found THEN
+            status := 'The goods was not found';
             DBMS_OUTPUT.put_line(status);
+            RETURN;
+    END;
+    BEGIN
+        SELECT id
+            INTO expected_supplierId
+            FROM Supplier
+            WHERE enterprise_name=:new.supplier_name;
+        EXCEPTION WHEN no_data_found THEN
+            status := 'The supplier was not found';
+            DBMS_OUTPUT.put_line(status);
+            RETURN;
+    END;
+    BEGIN
+        SELECT id
+            INTO expected_truckId
+            FROM Truck
+            WHERE plate=:new.truck_plate;
+        EXCEPTION WHEN no_data_found THEN
+            status := 'The truck was not found';
+            DBMS_OUTPUT.put_line(status);
+            RETURN;
+    END;
+    BEGIN
+        SELECT id
+            INTO expected_deliveryContractId
+            FROM Delivery_contract
+            WHERE (TO_DATE(delivery_date,'DD-MON-YYYY')=TO_DATE(SYSDATE,'DD-MON-YYYY') AND supplier_id=expected_supplierId);
+        EXCEPTION WHEN no_data_found THEN
+            status := 'There is no delivery from this supplier today!';
+            expected_deliveryContractId := 0;
+            DBMS_OUTPUT.put_line(status);
+    END;
+    BEGIN
+        IF expected_deliveryContractId<>0 THEN
+            SELECT goods_number
+                INTO expected_goodsNumber
+                FROM Delivery_contract_and_goods
+                WHERE (delivery_contract_id=expected_deliveryContractId AND goods_id = expected_goodsId);    
+            IF :new.goods_number<>expected_goodsNumber THEN
+                status := 'Expected ' || TO_CHAR(expected_goodsNumber) || ' goods. Got ' || TO_CHAR(:new.goods_number);
+                DBMS_OUTPUT.put_line(status);
+            END IF;
         END IF;
-    END IF;
+        EXCEPTION WHEN no_data_found THEN
+            status := 'The goods is not expected in this delivery';
+            DBMS_OUTPUT.put_line(status);
+    END;
     
     SELECT seq_parcel.nextval
         INTO parcelId
@@ -221,7 +288,7 @@ END trg_insert_parcel;
 -- Если партия принимается (Problematic_parcel.is_accessed=1), то она отправляется на склад на соответствующую полку;
 -- Если парти отзывается (Problematic_parcel.is_accessed=1) или решение о принятии ещё не принято (=NULL), то с ней ничего не делается.
 SET SERVEROUTPUT ON
-CREATE OR REPLACE TRIGGER ParcelToStorage
+CREATE OR REPLACE TRIGGER trg_parcel_to_s
     AFTER UPDATE OF is_accepted ON Problematic_Parcel
     FOR EACH ROW
 DECLARE
@@ -288,7 +355,7 @@ BEGIN
             );
         END IF;
     END IF;
-END ParcelToStorage;
+END trg_parcel_to_s;
 /
 -- Движение партии со склада в торговый зал, если в нём есть место (На самом деле, пока что можно с любой полки на любую полку тягать)
 SET SERVEROUTPUT ON
@@ -320,6 +387,7 @@ BEGIN
             INTO userId
             FROM Staff_member
             WHERE login=userName;
+
         -- Проведение операции по расходу на складе
         SELECT seq_operation.nextval
             INTO operationId
@@ -331,7 +399,6 @@ BEGIN
             SYSDATE,
             :new.SSid
         );
-        --Я ломаюсь здесь
         INSERT INTO Operation_and_parcel VALUES (
             operationId,
             :new.parcel_id,
@@ -396,10 +463,7 @@ BEGIN
     );
 END trg_parcel_from_s_to_tz;
 /
--- Ищем положительные остатки партий на складе на полке с типом хранения ?
--- Сортируем их по времени прибытия и выбираем самый ранний
--- Выводим id найденной партии и её остаток на полке ?
--- Перевозим как можно больше единиц товаров, но не больше чем свободное место в ТЗ на нужной полке
+-- Заполнение торгового зала при наличии свободных мест на полке
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_fill_tz
     FOR UPDATE OF number_of_places ON Shelf
@@ -618,8 +682,7 @@ BEGIN
             INTO stocktakingId
             FROM Stocktaking
             WHERE TO_DATE(executing_date,'dd-mm-yy')=TO_DATE(SYSDATE,'dd-mm-yy');
-        EXCEPTION
-        WHEN no_data_found THEN
+        EXCEPTION WHEN no_data_found THEN
             BEGIN
                 SELECT user
                     INTO userName
@@ -631,11 +694,6 @@ BEGIN
                 SELECT seq_stocktaking.nextval
                     INTO stocktakingId
                     FROM Dual;
-                INSERT INTO Stocktaking VALUES (
-                    stocktakingId,
-                    userid,
-                    SYSDATE
-                );
             END;
     END;
     INSERT INTO Stocktaking_parcel VALUES (
@@ -645,32 +703,51 @@ BEGIN
         :new.shelf_id,
         :new.stock
     );
+    INSERT INTO Stocktaking VALUES (
+        stocktakingId,
+        userid,
+        SYSDATE
+        );
 END trg_stocktaking_parcel;
 /
 -- Сравнение стоков с данными в ИС с целью найти пропажу
 SET SERVEROUTPUT ON
 CREATE OR REPLACE TRIGGER trg_stealing
-    AFTER INSERT ON Stocktaking_parcel
-    FOR EACH ROW
-DECLARE
+    FOR INSERT ON Stocktaking_parcel
+    COMPOUND TRIGGER
+    
+    parcelId NUMERIC;
+    shelfId NUMERIC;
+    stock NUMERIC;
+    
     expectedStock NUMERIC;
-BEGIN
+    
+BEFORE EACH ROW IS BEGIN
+    stock:=:new.stock;
+    parcelId:=:new.parcel_id;
+    shelfId:=:new.shelf_id;
     SELECT number_of_goods
         INTO expectedStock
         FROM Shelf_and_parcel
-        WHERE (parcel_id=:new.parcel_id AND shelf_id=:new.shelf_id);
-    IF expectedStock>:new.stock THEN
+        WHERE (
+            parcel_id=parcelId AND
+            shelf_id=shelfId
+            );
+END BEFORE EACH ROW;
+
+AFTER STATEMENT IS BEGIN
+    IF expectedStock>stock THEN
         INSERT INTO WriteOff_view VALUES (
-            :new.shelf_id,
-            :new.parcel_id,
-            expectedStock-:new.stock,
+            shelfId,
+            parcelId,
+            expectedStock-stock,
             4,
             'inventarization'
         );
     END IF;
+END AFTER STATEMENT;
 END trg_stealing;
 /
-
 -- Информация о товарах из партий, привезённых сегодня
 SELECT G.name as Goods_name, GT.name as Goods_type, G.shelf_life, DCaG.goods_number, DC.delivery_date, S.enterprise_name
 FROM Goods G, Delivery_contract_and_goods DCaG, Delivery_contract DC, Goods_type GT, Supplier S
@@ -696,12 +773,12 @@ UPDATE WriteOff
     SET commentary='OK'
     WHERE id=1;
 
-DBMS_OUTPUT.put_line('');
-
-select exam.parcel_residue(1,3) from dual;
+select exam.parcel_residue(1,6) from dual;
 
 INSERT INTO Stocktaking_parcel_view VALUES (
     1,
     6,
     1
 );
+
+DBMS_OUTPUT.put_line('');

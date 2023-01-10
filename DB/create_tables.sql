@@ -315,8 +315,8 @@ CREATE TABLE Stocktaking_parcel ( -- Инвентаризация и её пар
   stock NUMERIC(8) NOT NULL, -- Остаток партии (количество)
   --
   PRIMARY KEY(id),
-  FOREIGN KEY(stocktaking_id)
-    REFERENCES Stocktaking(id),
+  --FOREIGN KEY(stocktaking_id)
+  --  REFERENCES Stocktaking(id),
   FOREIGN KEY(parcel_id)
     REFERENCES Parcel(id),
   FOREIGN KEY(shelf_id)
@@ -324,14 +324,18 @@ CREATE TABLE Stocktaking_parcel ( -- Инвентаризация и её пар
 );
 
 
-CREATE TABLE Parcel_User (
-  goods_name VARCHAR2(64),
-  supplier_name VARCHAR2(64),
-  truck_plate VARCHAR2(64),
-  goods_loss_date DATE,
-  goods_number NUMERIC
-);
-CREATE OR REPLACE VIEW Parcel_View AS SELECT * FROM Parcel_User;
+--CREATE TABLE Parcel_User (
+--  goods_name VARCHAR2(64),
+--  supplier_name VARCHAR2(64),
+--  truck_plate VARCHAR2(64),
+--  goods_loss_date DATE,
+--  goods_number NUMERIC
+--);
+--CREATE OR REPLACE VIEW Parcel_View AS SELECT * FROM Parcel_User;
+
+CREATE OR REPLACE VIEW Parcel_View AS
+  SELECT G.name AS goods_name, S.enterprise_name AS supplier_name, T.plate AS truck_plate, P.loss_date AS goods_loss_date, P.goods_number
+  FROM Goods G, Supplier S, Truck T, Parcel P;
 
 CREATE TABLE Problematic_Parcel (
   parcel_id NUMERIC,
